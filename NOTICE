@@ -1,0 +1,22 @@
+Pulsession
+Copyright 2026 JasperHan (github.com/jasperhan99)
+
+This product is a modified version of Pulse
+(https://github.com/qunqin24/Pulse), Copyright the Pulse contributors,
+licensed under the Apache License, Version 2.0. See LICENSE.
+
+Changes made in Pulsession:
+- Added a session monitor for PI-Desktop, Claude Code and Codex sessions
+  (Sources/Pulse/Sessions/, Sources/Pulse/Settings/SessionsSettingsView.swift,
+  Tests/PulseTests/SessionMonitorTests.swift, Docs/sessions.md), wired into
+  the existing panel, settings, store and app delegate at commented seams.
+- Changed the app's identity: bundle identifier io.github.jasperhan.pulsession,
+  URL scheme pulsession://, storage in ~/Library/Application Support/Pulsession,
+  and no Sparkle update feed.
+- Renamed the product in user-facing strings, rewrote the English and
+  Simplified Chinese READMEs, and removed the other README translations and
+  upstream's appcast.xml.
+
+Pulse's design attribution: Pulse was inspired by a UI concept shared by
+Vinz (@hivinz_) on X. Bundled third-party assets keep their own licenses;
+see THIRD_PARTY_NOTICES.md.

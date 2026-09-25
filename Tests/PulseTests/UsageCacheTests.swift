@@ -1,0 +1,330 @@
+import Foundation
+import Testing
+@testable import Pulse
+
+/// `UsageCache.reconciled`, which decides what a card actually shows when a
+/// fetch comes back empty — and which is where "a reading could go backwards"
+/// was fixed. Exercised against a scratch file, which is what `init(file:)`
+/// exists for.
+@Suite("Cache reconciliation")
+struct UsageCacheTests {
+    private static let account = AccountKey(.codex)
+
+    private static func cache() -> UsageCache {
+        UsageCache(
+            file: FileManager.default.temporaryDirectory
+                .appending(path: "pulse-cache-test-\(UUID().uuidString).json")
+        )
+    }
+
+    private static func window(_ id: String = "5h", used: Double, resetsAt: Date?) -> UsageWindow {
+        UsageWindow(
+            id: id,
+            kind: .fiveHour,
+            scope: nil,
+            usedFraction: used,
+            windowSeconds: 5 * 3_600,
+            resetsAt: resetsAt
+        )
+    }
+
+    private static func live(_ windows: [UsageWindow], at observedAt: Date) -> ProviderUsage {
+        ProviderUsage(
+            account: account,
+            windows: windows,
+            observedAt: observedAt,
+            state: .live,
+            plan: "Pro",
+            creditBalance: nil
+        )
+    }
+
+    /// An hour out, so nothing here trips the reset filter by accident.
+    private static var soon: Date { Date().addingTimeInterval(3_600) }
+
+    @Test("A live reading is handed back as it is, and banked")
+    func liveIsStored() async {
+        let cache = Self.cache()
+        let reading = Self.live([Self.window(used: 0.4, resetsAt: Self.soon)], at: Date())
+
+        let out = await cache.reconciled(reading)
+        #expect(out.state == .live)
+        #expect(out.windows.count == 1)
+
+        let banked = await cache.lastReading(for: Self.account)
+        #expect(banked?.state == .stale)
+        #expect(banked?.windows.first?.usedFraction == 0.4)
+    }
+
+    /// The rule was `!windows.isEmpty`, on the fair assumption that a reading
+    /// with no limits in it is a fetch that went wrong. DeepSeek broke it: on
+    /// "balance only" a **complete** answer is deliberately a balance and no
+    /// windows, and the cache kept handing back the previous reading — so
+    /// switching the setting appeared to do nothing at all.
+    @Test("A live reading with a balance and no limits is an answer, not a failure")
+    func aBalanceWithoutLimitsIsAnAnswer() async {
+        let cache = Self.cache()
+        let deepSeek = AccountKey(.deepSeek)
+        // Recent, or the bank is discarded as older than a day and every path
+        // trivially hands the fetched reading back — proving nothing.
+        let earlier = Date().addingTimeInterval(-600)
+
+        let measured = ProviderUsage(
+            account: deepSeek,
+            windows: [Self.window(used: 0.4, resetsAt: nil)],
+            observedAt: earlier,
+            state: .live,
+            plan: nil,
+            creditBalance: "¥9.40"
+        )
+        _ = await cache.reconciled(measured)
+
+        let balanceOnly = ProviderUsage(
+            account: deepSeek,
+            windows: [],
+            observedAt: earlier.addingTimeInterval(60),
+            state: .live,
+            plan: nil,
+            creditBalance: "¥9.40"
+        )
+        let shown = await cache.reconciled(balanceOnly)
+
+        #expect(shown.windows.isEmpty)
+        #expect(shown.state == .live)
+        #expect(shown.creditBalance == "¥9.40")
+    }
+
+    /// The other half of the same rule, which must not be lost with it: a
+    /// reading carrying nothing at all is still a failure to fall back from.
+    @Test("A live reading carrying nothing at all is still not an answer")
+    func anEmptyReadingIsStillAFailure() async {
+        let cache = Self.cache()
+        let earlier = Date().addingTimeInterval(-600)
+        _ = await cache.reconciled(Self.live([Self.window(used: 0.4, resetsAt: nil)], at: earlier))
+
+        let empty = ProviderUsage(
+            account: Self.account,
+            windows: [],
+            observedAt: earlier.addingTimeInterval(60),
+            state: .live,
+            plan: nil,
+            creditBalance: nil
+        )
+        let shown = await cache.reconciled(empty)
+
+        #expect(shown.windows.count == 1)
+        #expect(shown.state == .stale)
+    }
+
+    /// `reconciled` learned that a balance with no limits is an answer; the
+    /// **read** path did not, so such a reading could be banked and never come
+    /// back out — blank through the first round trip after launch, no fallback
+    /// when a fetch failed, and `--json` reporting a null balance.
+    @Test("A banked balance with no limits can be read back")
+    func aBankedBalanceComesBackOut() async {
+        let cache = Self.cache()
+        let deepSeek = AccountKey(.deepSeek)
+
+        var reading = ProviderUsage(
+            account: deepSeek, windows: [], observedAt: Date(),
+            state: .live, plan: nil, creditBalance: "¥9.40"
+        )
+        reading.creditRemaining = .init(amount: 9.4, currency: "CNY")
+        _ = await cache.reconciled(reading)
+
+        let restored = await cache.lastReading(for: deepSeek)
+        #expect(restored?.creditBalance == "¥9.40")
+        // And the figure, not only the string — otherwise the rail falls back
+        // to the long form `railText` exists to avoid.
+        #expect(restored?.creditRemaining?.amount == 9.4)
+        #expect(restored?.creditRemaining?.currency == "CNY")
+    }
+
+    /// `estimate` replaced a stored `isEstimated: Bool`. A cache written by
+    /// 1.0.9 carries the old key, and the synthesised decoder would ignore it —
+    /// so the first launch after upgrading drew Command Code's inferred
+    /// percentage with nothing marking it as inferred.
+    @Test("A window banked by an older build keeps its inferred mark")
+    func aLegacyEstimateSurvivesTheUpgrade() throws {
+        let legacy = #"""
+        {"id":"monthly","kind":{"monthly":{}},"usedFraction":0.58,
+         "windowSeconds":2592000,"reportsLength":true,
+         "isEstimated":true,"isExhausted":false}
+        """#
+        let window = try JSONDecoder().decode(UsageWindow.self, from: Data(legacy.utf8))
+
+        #expect(window.isEstimated)
+        #expect(window.estimate == .planPrice)
+        #expect(window.name.contains("estimated"))
+
+        // And nothing writes the old shape back out.
+        let rewritten = try JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(window)
+        ) as? [String: Any]
+        #expect(rewritten?["isEstimated"] == nil)
+        #expect(rewritten?["estimate"] as? String == "planPrice")
+    }
+
+    @Test("A failed fetch falls back to the banked figures, marked stale")
+    func failureFallsBackToCache() async {
+        let cache = Self.cache()
+        let observedAt = Date().addingTimeInterval(-300)
+        _ = await cache.reconciled(Self.live([Self.window(used: 0.4, resetsAt: Self.soon)], at: observedAt))
+
+        let out = await cache.reconciled(.unavailable(Self.account, reason: .unreachable))
+        #expect(out.state == .stale)
+        #expect(out.windows.first?.usedFraction == 0.4)
+        // It carries its own date, so the card can say how old it is.
+        #expect(out.observedAt.map { abs($0.timeIntervalSince(observedAt)) < 1 } == true)
+    }
+
+    @Test("A missing credential is never papered over")
+    func missingCredentialIsReported() async {
+        let cache = Self.cache()
+        _ = await cache.reconciled(Self.live([Self.window(used: 0.4, resetsAt: Self.soon)], at: Date()))
+
+        for reason: ProviderUsage.Unavailability in [
+            .apiKeyMissing, .ollamaSessionMissing, .signedOut,
+            .claudeDesktopNotSignedIn, .claudeDesktopKeyRefused
+        ] {
+            let out = await cache.reconciled(.unavailable(Self.account, reason: reason))
+            #expect(out.state == .unavailable(reason), "\(reason) must not be hidden behind the cache")
+        }
+    }
+
+    @Test("A gateway with no usable address is never papered over")
+    func missingGatewayAddressIsReported() async {
+        let cache = Self.cache()
+        let account = AccountKey(.sub2api)
+        var reading = ProviderUsage(
+            account: account, windows: [Self.window(used: 0.4, resetsAt: Self.soon)],
+            observedAt: Date(), state: .live, plan: nil, creditBalance: nil
+        )
+        reading.sourceScope = GatewayAddress.scope(of: "gateway-a.example.com", key: "sk-a")
+        _ = await cache.reconciled(reading)
+
+        for reason: ProviderUsage.Unavailability in [.serverAddressMissing, .serverAddressRefused] {
+            let out = await cache.reconciled(.unavailable(account, reason: reason))
+            #expect(out.state == .unavailable(reason), "\(reason) must not be hidden behind the cache")
+        }
+    }
+
+    /// Pointing a gateway account at another deployment must not leave the old
+    /// server's figures on the ring when the new one fails — but the same
+    /// server failing for a moment still falls back to them.
+    @Test("A gateway's banked reading stands in only for the same server and key", arguments: [Provider.sub2api, .newAPI])
+    func gatewayCacheIsScopedToItsServer(provider: Provider) async {
+        let cache = Self.cache()
+        let account = AccountKey(provider)
+        var reading = ProviderUsage(
+            account: account, windows: [Self.window(used: 0.4, resetsAt: Self.soon)],
+            observedAt: Date().addingTimeInterval(-300), state: .live, plan: nil, creditBalance: nil
+        )
+        reading.sourceScope = GatewayAddress.scope(of: "https://gateway-a.example.com/v1", key: "sk-a")
+        _ = await cache.reconciled(reading)
+
+        var sameServer = ProviderUsage.unavailable(account, reason: .unreachable)
+        sameServer.sourceScope = GatewayAddress.scope(of: "gateway-a.example.com/", key: "sk-a")
+        #expect(await cache.reconciled(sameServer).state == .stale)
+
+        var otherServer = ProviderUsage.unavailable(account, reason: .apiKeyRefused)
+        otherServer.sourceScope = GatewayAddress.scope(of: "gateway-b.example.com", key: "sk-a")
+        #expect(await cache.reconciled(otherServer).state == .unavailable(.apiKeyRefused))
+
+        var otherKey = ProviderUsage.unavailable(account, reason: .unreachable)
+        otherKey.sourceScope = GatewayAddress.scope(of: "gateway-a.example.com", key: "sk-b")
+        #expect(await cache.reconciled(otherKey).state == .unavailable(.unreachable))
+    }
+
+    /// Qoder's two sites are two accounts. A reading banked for one must not
+    /// stand in when the other fails, and a session discarded by switching
+    /// sites is reported as missing rather than hidden behind the old figures.
+    @Test("A Qoder reading stands in only for the same site and session")
+    func qoderCacheIsScopedToItsSite() async {
+        let cache = Self.cache()
+        let account = AccountKey(.qoder)
+        var reading = ProviderUsage(
+            account: account, windows: [Self.window(used: 0.4, resetsAt: Self.soon)],
+            observedAt: Date().addingTimeInterval(-300), state: .live, plan: nil, creditBalance: nil
+        )
+        reading.sourceScope = QoderUsageService.scope(site: .international, cookie: "sid=a")
+        _ = await cache.reconciled(reading)
+
+        var sameSite = ProviderUsage.unavailable(account, reason: .unreachable)
+        sameSite.sourceScope = QoderUsageService.scope(site: .international, cookie: "sid=a")
+        #expect(await cache.reconciled(sameSite).state == .stale)
+
+        var otherSite = ProviderUsage.unavailable(account, reason: .unreachable)
+        otherSite.sourceScope = QoderUsageService.scope(site: .china, cookie: "sid=a")
+        #expect(await cache.reconciled(otherSite).state == .unavailable(.unreachable))
+
+        var otherSession = ProviderUsage.unavailable(account, reason: .qoderSessionExpired)
+        otherSession.sourceScope = QoderUsageService.scope(site: .international, cookie: "sid=b")
+        #expect(await cache.reconciled(otherSession).state == .unavailable(.qoderSessionExpired))
+
+        let cleared = await cache.reconciled(.unavailable(account, reason: .qoderSessionMissing))
+        #expect(cleared.state == .unavailable(.qoderSessionMissing))
+    }
+
+    @Test("A reading never goes backwards")
+    func olderReadingDoesNotWin() async {
+        let cache = Self.cache()
+        let newer = Date()
+        _ = await cache.reconciled(Self.live([Self.window(used: 0.9, resetsAt: Self.soon)], at: newer))
+
+        // The status-line route calls its capture live for ten minutes, so a
+        // live reading can arrive older than what the endpoint banked. The
+        // later of the two wins, not the one that called itself live.
+        let out = await cache.reconciled(
+            Self.live([Self.window(used: 0.5, resetsAt: Self.soon)], at: newer.addingTimeInterval(-600))
+        )
+        #expect(out.windows.first?.usedFraction == 0.9)
+        #expect(out.state == .stale)
+    }
+
+    @Test("A window that has already reset is dropped, not aged")
+    func expiredWindowIsDropped() async {
+        let cache = Self.cache()
+        _ = await cache.reconciled(
+            Self.live([Self.window(used: 0.9, resetsAt: Date().addingTimeInterval(-60))], at: Date())
+        )
+
+        // Its only window has reset, so there is nothing left worth showing —
+        // and the failure is reported rather than dressed in yesterday's
+        // percentages.
+        let out = await cache.reconciled(.unavailable(Self.account, reason: .unreachable))
+        #expect(out.state == .unavailable(.unreachable))
+    }
+
+    @Test("Nothing older than a day is offered")
+    func staleBeyondADayIsDropped() async {
+        let cache = Self.cache()
+        _ = await cache.reconciled(
+            Self.live(
+                [Self.window(used: 0.9, resetsAt: Date().addingTimeInterval(48 * 3_600))],
+                at: Date().addingTimeInterval(-(UsageCache.maximumAge + 3_600))
+            )
+        )
+
+        let out = await cache.reconciled(.unavailable(Self.account, reason: .unreachable))
+        #expect(out.state == .unavailable(.unreachable))
+    }
+
+    @Test("A fetch with nothing in it takes the cache's figures")
+    func emptyFetchTakesTheCache() async {
+        let cache = Self.cache()
+        _ = await cache.reconciled(Self.live([Self.window(used: 0.4, resetsAt: Self.soon)], at: Date()))
+
+        let empty = ProviderUsage(
+            account: Self.account,
+            windows: [],
+            observedAt: Date(),
+            state: .live,
+            plan: nil,
+            creditBalance: nil
+        )
+        let out = await cache.reconciled(empty)
+        #expect(out.windows.count == 1)
+        #expect(out.state == .stale)
+    }
+}

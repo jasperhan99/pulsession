@@ -1,0 +1,130 @@
+name: Bug report · 问题报告
+description: Something is broken or behaving wrongly. 功能异常或行为不对。
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "English or 中文， whichever you'd rather. 中英文都可以。"
+
+  - type: markdown
+    attributes:
+      value: >
+        A vague report costs a round trip before anyone can start. Say where you
+        saw it, what it showed, and what the service itself showed at the same
+        moment. 含糊的报告要先来回问一轮。写清楚在哪看到的、显示成什么，
+        以及同一时刻服务方自己显示什么。
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Which provider is it about? / 是哪个服务的问题
+      description: >
+        Pick the panel itself if it isn't about one service's reading.
+        z.ai and Zhipu are two separate accounts; pick the shop you bought
+        from. 如果不是某一个服务的读数，选"面板本身"。z.ai 和 Zhipu 是两套
+        账号，选你购买的那个。
+      options:
+        - Claude Code
+        - Codex
+        - Antigravity
+        - Cursor
+        - OpenCode Go
+        - Kimi Code
+        - Ollama Cloud
+        - z.ai
+        - Zhipu
+        - MiniMax
+        - MiniMax CN
+        - GitHub Copilot
+        - Grok
+        - Grok Bot
+        - Volcengine
+        - Command Code
+        - DeepSeek
+        - The panel itself · 面板本身，不是某个服务
+    validations:
+      required: true
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where did you see it? / 在哪里出现的
+      options:
+        - The panel or the rail · 悬浮面板或胶囊
+        - Settings · 设置
+        - Notifications · 通知
+        - The --json output or another integration · JSON 输出或其他集成
+        - The app itself (launch, update, login) · app 本身（启动、更新、登录）
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened / 发生了什么
+      description: >
+        The exact value, wording or behaviour you saw, and what you expected
+        instead. A screenshot helps for anything visual. 具体看到的数字、文案或
+        行为，以及你期望的结果。界面问题贴张截图。
+      placeholder: |
+        Saw: Claude Code ring showed 42% at 14:20 and was red.
+        Expected: about 60%, which matches the CLI's /usage.
+    validations:
+      required: true
+
+  - type: textarea
+    id: official
+    attributes:
+      label: What does the service itself say? / 服务方自己显示多少
+      description: >
+        For a reading that looks wrong: what the provider's own dashboard or
+        CLI reports at the same moment. That tells us whether Pulse is reading
+        it wrong or the service is reporting it that way. 如果数字看着不对，
+        同一时刻它的官网控制台或 CLI 报的是多少。这能区分是 Pulse 读错了，
+        还是服务方本来就是这么报的。
+      placeholder: |
+        provider dashboard / CLI value:
+        Pulse value:
+        both read at (time):
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce / 复现步骤
+      description: >
+        And whether it happens on every refresh or only once. 以及是每次刷新
+        都出现，还是只出现了一次。
+      placeholder: |
+        1.
+        2.
+        Every refresh / happened once:
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Pulse version / Pulse 版本
+      description: Settings › About. 设置 › 关于。
+      placeholder: "1.0.6"
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version / 系统版本
+      placeholder: "macOS 26.1"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: secrets
+    attributes:
+      label: Before posting / 发布前
+      options:
+        - label: No API key, token, cookie or account id in my report or screenshots. 内容和截图中不含密钥、令牌、cookie 或账号 id。
+          required: true
